@@ -136,21 +136,6 @@ jobs:
               echo "Disk space is sufficient."
             fi
       # ---------------------------------------------------
-      # 9.6. Set server directory permissions
-      # ---------------------------------------------------
-      - name: Set server directory permissions
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USER }}
-          key: ${{ secrets.SERVER_SSH_KEY }}
-          script: |
-            echo "Setting ownership and permissions for /var/www/MyShop..."
-            sudo mkdir -p /var/www/MyShop
-            sudo chown -R ${{ secrets.SERVER_USER }}:${{ secrets.SERVER_USER }} /var/www/MyShop
-            sudo chmod -R 755 /var/www/MyShop
-            echo "Permissions set."
-      # ---------------------------------------------------
       # 10. Upload build to server (using rsync directly)
       # ---------------------------------------------------
       - name: Upload build to server
@@ -163,7 +148,7 @@ jobs:
       
           echo "Uploading standalone build..."
       
-          rsync -avz --delete .next/standalone/ \
+          rsync -avz .next/standalone/ \
             ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:/var/www/MyShop/
       
           rsync -avz .next/static/ \

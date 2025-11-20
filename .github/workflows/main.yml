@@ -53,6 +53,17 @@ jobs:
         run: npm run build
 
       # ---------------------------------------------------
+      # 6.5. Verify standalone build
+      # ---------------------------------------------------
+      - name: Verify standalone build
+        run: |
+          if [ ! -f .next/standalone/server.js ]; then
+            echo "Error: Standalone build failed. Check next.config.js for 'output: standalone'."
+            exit 1
+          fi
+          echo "Standalone build verified."
+
+      # ---------------------------------------------------
       # 7. Debug: Check workspace and files
       # ---------------------------------------------------
       - name: Debug - Check workspace and files
@@ -73,10 +84,10 @@ jobs:
       # ---------------------------------------------------
       - name: Validate source files
         run: |
-          REQUIRED_FILES=".next public package.json package-lock.json"
+          REQUIRED_FILES=".next .next/standalone public package.json package-lock.json"
           for file in $REQUIRED_FILES; do
             if [ ! -e "$file" ]; then
-              echo "Error: Required file/directory '$file' is missing!"
+              echo "Error: Required file/directory '$file' is missing! Ensure Next.js is configured for standalone output."
               exit 1
             fi
           done
@@ -124,6 +135,21 @@ jobs:
             else
               echo "Disk space is sufficient."
             fi
+      # ---------------------------------------------------
+      # 9.6. Set server directory permissions
+      # ---------------------------------------------------
+      - name: Set server directory permissions
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          script: |
+            echo "Setting ownership and permissions for /var/www/MyShop..."
+            sudo mkdir -p /var/www/MyShop
+            sudo chown -R ${{ secrets.SERVER_USER }}:${{ secrets.SERVER_USER }} /var/www/MyShop
+            sudo chmod -R 755 /var/www/MyShop
+            echo "Permissions set."
       # ---------------------------------------------------
       # 10. Upload build to server (using rsync directly)
       # ---------------------------------------------------

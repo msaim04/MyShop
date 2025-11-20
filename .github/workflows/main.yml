@@ -205,6 +205,11 @@ jobs:
           key: ${{ secrets.SERVER_SSH_KEY }}
           script: |
             cd /var/www/MyShop
+            echo "Checking if server.js exists..."
+            if [ ! -f server.js ]; then
+              echo "Error: server.js not found. Check standalone build upload."
+              exit 1
+            fi
             echo "Starting app with PM2 on port 3001..."
             pm2 delete MyShop_frontend || true
             PORT=3001 pm2 start npm --name "MyShop_frontend" -- run start

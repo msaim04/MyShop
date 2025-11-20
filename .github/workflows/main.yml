@@ -1,0 +1,266 @@
+name: Deploy Frontend (MyShop Website)
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  deploy-frontend:
+    name: Deploy MyShop Website
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      # ---------------------------------------------------
+      # 1. Checkout repository
+      # ---------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ---------------------------------------------------
+      # 2. Setup Node.js
+      # ---------------------------------------------------
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.10.0
+          cache: "npm"
+
+      # ---------------------------------------------------
+      # 3. Install dependencies
+      # ---------------------------------------------------
+      - name: Install dependencies
+        run: npm ci
+
+      # ---------------------------------------------------
+      # 4. Lint code
+      # ---------------------------------------------------
+      - name: Lint code
+        run: npm run lint
+
+      # ---------------------------------------------------
+      # 5. Run unit tests
+      # ---------------------------------------------------
+      - name: Run unit tests
+        run: npm test --if-present
+
+      # ---------------------------------------------------
+      # 6. Build Next.js project
+      # ---------------------------------------------------
+      - name: Build Next.js project
+        run: npm run build
+
+      # ---------------------------------------------------
+      # 7. Debug: Check workspace and files
+      # ---------------------------------------------------
+      - name: Debug - Check workspace and files
+        run: |
+          echo "Current directory: $(pwd)"
+          echo "Listing all files:"
+          ls -la
+          echo "Checking .next directory:"
+          if [ -d .next ] && [ "$(ls -A .next)" ]; then
+            echo ".next exists and has contents"
+            ls -la .next | head -10
+          else
+            echo ".next is missing or empty - build may have failed"
+            exit 1
+          fi
+      # ---------------------------------------------------
+      # 8. Validate source files exist
+      # ---------------------------------------------------
+      - name: Validate source files
+        run: |
+          REQUIRED_FILES=".next public package.json package-lock.json"
+          for file in $REQUIRED_FILES; do
+            if [ ! -e "$file" ]; then
+              echo "Error: Required file/directory '$file' is missing!"
+              exit 1
+            fi
+          done
+          echo "All required source files exist."
+      # ---------------------------------------------------
+      # 9. Backup current version on server (rotate to keep 3)
+      # ---------------------------------------------------
+      - name: Backup current version on server
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          script: |
+            BACKUP_DIR="/var/www/MyShop-backups"
+            mkdir -p "$BACKUP_DIR"
+            if [ -d /var/www/MyShop ]; then
+              echo "Rotating backups to keep max 3..."
+              # Shift existing backups
+              rm -rf "$BACKUP_DIR/backup-3"  # Remove oldest
+              mv "$BACKUP_DIR/backup-2" "$BACKUP_DIR/backup-3" 2>/dev/null || true
+              mv "$BACKUP_DIR/backup-1" "$BACKUP_DIR/backup-2" 2>/dev/null || true
+              # Create new backup
+              mv /var/www/MyShop "$BACKUP_DIR/backup-1"
+              echo "Backup created as $BACKUP_DIR/backup-1. Kept 3 most recent."
+            else
+              echo "No existing version to backup."
+            fi
+      # ---------------------------------------------------
+      # 9.5. Check server disk space
+      # ---------------------------------------------------
+      - name: Check server disk space
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          script: |
+            echo "Checking disk space on server..."
+            DISK_USAGE=$(df /var/www | tail -1 | awk '{print $5}' | sed 's/%//')
+            echo "Disk usage: $DISK_USAGE%"
+            if [ "$DISK_USAGE" -gt 90 ]; then
+              echo "Error: Disk usage is over 90% ($DISK_USAGE%). Free up space before deploying."
+              exit 1
+            else
+              echo "Disk space is sufficient."
+            fi
+      # ---------------------------------------------------
+      # 10. Upload build to server (using rsync directly)
+      # ---------------------------------------------------
+      - name: Upload build to server
+        run: |
+          echo "Setting up SSH key..."
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SERVER_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ secrets.SERVER_HOST }} >> ~/.ssh/known_hosts
+      
+          echo "Uploading standalone build..."
+      
+          rsync -avz --delete .next/standalone/ \
+            ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:/var/www/MyShop/
+      
+          rsync -avz .next/static/ \
+            ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:/var/www/MyShop/.next/static/
+      
+          rsync -avz public/ \
+            ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:/var/www/MyShop/public/
+      
+          rsync -avz package.json \
+            ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:/var/www/MyShop/
+      
+          echo "Upload complete."
+
+
+      # ---------------------------------------------------
+      # 11. Install dependencies on server
+      # ---------------------------------------------------
+      - name: Install dependencies on server
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          script: |
+            cd /var/www/MyShop
+            echo "Installing production dependencies..."
+            npm ci --omit=dev
+      # ---------------------------------------------------
+      # 12. Start frontend with PM2
+      # ---------------------------------------------------
+      - name: Start frontend with PM2
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          script: |
+            cd /var/www/MyShop
+            echo "Starting app with PM2 on port 3001..."
+            pm2 delete MyShop_frontend || true
+            PORT=3001 pm2 start npm --name "MyShop_frontend" -- run start
+            pm2 save
+            # Check if the process is running and log errors
+            if pm2 describe MyShop_frontend > /dev/null 2>&1; then
+              echo "PM2 process MyShop_frontend started successfully on port 3001."
+              pm2 logs MyShop_frontend --lines 10 --nostream  # Show recent logs
+            else
+              echo "Error: Failed to start PM2 process MyShop_frontend."
+              pm2 logs MyShop_frontend --lines 20 --nostream || echo "No logs available."
+              exit 1
+            fi
+      # ---------------------------------------------------
+      # 13. Reload Nginx
+      # ---------------------------------------------------
+      - name: Reload Nginx
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          script: |
+            echo "Reloading Nginx..."
+            # Test config first
+            if sudo nginx -t; then
+              sudo systemctl reload nginx
+              echo "Nginx reloaded successfully."
+            else
+              echo "Error: Nginx config test failed. Check /etc/nginx/sites-available/MyShop."
+              sudo nginx -t  # Show error details
+              exit 1
+            fi
+      # ---------------------------------------------------
+      # 14. Wait for app to stabilize
+      # ---------------------------------------------------
+      - name: Wait for app to stabilize
+        run: sleep 5
+
+      # ---------------------------------------------------
+      # 15. Health check website
+      # ---------------------------------------------------
+      - name: Health check website
+        id: health
+        run: |
+          if [ -z "${{ secrets.FRONTEND_URL }}" ]; then
+            echo "Error: FRONTEND_URL secret is not set. Please add it to repository secrets."
+            exit 1
+          fi
+          echo "Performing health check on ${{ secrets.FRONTEND_URL }}..."
+          STATUS=$(curl -o /dev/null -s -w "%{http_code}" ${{ secrets.FRONTEND_URL }} || echo "000")
+          echo "HTTP Status: $STATUS"
+          if [ "$STATUS" != "200" ]; then
+            echo "Health check failed (status: $STATUS). Triggering rollback."
+            echo "failed=true" >> $GITHUB_ENV
+            exit 1
+          else
+            echo "Health check passed."
+            echo "failed=false" >> $GITHUB_ENV
+          fi
+        continue-on-error: true
+
+      # ---------------------------------------------------
+      # 16. Rollback if health check failed
+      # ---------------------------------------------------
+      - name: Rollback to previous version
+        if: env.failed == 'true'
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          script: |
+            echo "Rolling back to previous version..."
+            BACKUP_DIR="/var/www/MyShop-backups"
+            if [ -d "$BACKUP_DIR/backup-1" ]; then
+              rm -rf /var/www/MyShop
+              mv "$BACKUP_DIR/backup-1" /var/www/MyShop
+              cd /var/www/MyShop
+              pm2 delete MyShop_frontend || true
+              PORT=3001 pm2 start npm --name "MyShop_frontend" -- run start
+              pm2 save
+              sudo systemctl reload nginx
+              echo "Rollback complete."
+            else
+              echo "No backup available for rollback."
+              exit 1
+            fi
